@@ -109,16 +109,17 @@ public fn connectJob(
 ) -> Result<Box<dyn mut fn(borrow TaskSender<Incoming>) + Send>, AllocError> {
     return Ok(Box.create(move (out: borrow TaskSender<Incoming>) => {
         let ended = Async.run(session(host, port, outgoing, out));
-        let why = match (ended) {
-            Ok() => "the server closed the connection",
-            Err(AsyncError.Io(_)) => "cannot reach the server",
-            Err(_) => "the connection ended",
+        var why = String.create();
+        let built = match (ended) {
+            Ok() => why.append("the server closed the connection"),
+            Err(AsyncError.Io(e)) => match (why.append("network error: ")) {
+                Ok() => why.append(e.message()), // the system's reason, so the user can act on it
+                Err(x) => Err(x),
+            },
+            Err(_) => why.append("the connection ended"),
         };
-        match (String.from(why)) {
-            Ok(s) => {
-                let told = out.send(Incoming { kind: NET_CLOSED, text: s });
-            }
-            Err(_) => {}
+        if (built.isOk()) {
+            let told = out.send(Incoming { kind: NET_CLOSED, text: why });
         }
     })?);
 }

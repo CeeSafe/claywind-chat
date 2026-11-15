@@ -29,7 +29,8 @@ printf 'HELLO ada\nJOIN lobby\nSAY lobby hello\n' | nc 127.0.0.1 7700
 ## Running the client
 
 The client's dependencies are packages in subdirectories of the ClayWind repository, which needs a `ceesafec` with
-CeeSafe's ADR 0152 (git dependencies with `dir`), coming in the next release. Then, with a server running:
+CeeSafe's ADR 0152 (git dependencies with `dir`), coming in the next release; on Windows also the fixes for ClayWind's
+findings N2 to N4 (git dependencies, and a connection that is a program's first socket). Then, with a server running:
 
 ```sh
 cd client && ceesafec build && ./out/claywind_chat
