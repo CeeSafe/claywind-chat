@@ -241,9 +241,10 @@ fn parseTime(t: StringView) -> i64 {
     return v;
 }
 
-/// "HH:MM" of a Unix time (UTC).
+/// "HH:MM" of a Unix time, in the system's time zone at that time (CeeSafe's Clock.localOffset, ADR 0153).
 fn clock(time: i64, w: borrow mut TextWriter) {
-    let day = time % 86400;
+    let local = time + Clock.localOffset(UnixTime { seconds: time, nanoseconds: 0 }) as i64;
+    let day = (local % 86400 + 86400) % 86400; // a time before 1970 too
     let h = day / 3600;
     let m = (day % 3600) / 60;
     if (h < 10) {

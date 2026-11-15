@@ -24,8 +24,8 @@ fn hostOf(text: StringView) -> String? {
     return if (b.length > 0) String.from(text)! else null;
 }
 
-/// The server's port from "host:port" (7700 without one).
-fn portOf(text: StringView) -> u16 {
+/// The server's port from "host:port" (7700 without one); null when it is not a number from 1 to 65535.
+fn portOf(text: StringView) -> u16? {
     let b = text.bytes();
     var at: usize? = null;
     for (i in 0..b.length) {
@@ -33,18 +33,24 @@ fn portOf(text: StringView) -> u16 {
             at = i;
         }
     }
-    var v: u32 = 0;
-    match (at) {
-        Some(i) => {
-            for (c in b[i + 1..b.length]) {
-                if (c >= '0' && c <= '9') {
-                    v = v * 10 + (c - '0') as u32;
-                }
-            }
-        }
-        null => {}
+    let start = match (at) {
+        Some(i) => i + 1,
+        null => { return 7700; }
+    };
+    if (start == b.length) {
+        return null;
     }
-    return if (v > 0 && v < 65536) truncate<u16>(v) else 7700;
+    var v: u32 = 0;
+    for (c in b[start..b.length]) {
+        if (c < '0' || c > '9') {
+            return null;
+        }
+        v = v * 10 + (c - '0') as u32;
+        if (v > 65535) {
+            return null; // also before a long run of digits could overflow
+        }
+    }
+    return if (v > 0) truncate<u16>(v) else null;
 }
 
 /// Saves what hot reload keeps.
@@ -219,10 +225,13 @@ fn main() -> i32 {
             app.wantsConnect = false;
             let server = app.server.trimmed();
             match (hostOf(server)) {
+                Some(_) if (portOf(server) == null) => {
+                    app.disconnected("The port must be a number from 1 to 65535");
+                }
                 Some(host) => {
                     match (Channel<String>.create(256)) {
                         Ok(queue) => {
-                            match (connectJob(host, portOf(server), queue.clone())) {
+                            match (connectJob(host, portOf(server) ?? 7700, queue.clone())) {
                                 Ok(job) => {
                                     match (connection.start(job)) {
                                         Ok() => { outgoing = queue; }
