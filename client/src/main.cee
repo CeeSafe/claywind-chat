@@ -1,0 +1,288 @@
+// SPDX-License-Identifier: MIT
+// ClayWind Chat: the desktop client. It is built on ClayWind's packages as any app would be: claywind (the UI),
+// claywind_desktop (the window, its input, fonts, menus, drops, hot reload), claywind_fonts (the system's fallback
+// fonts) and claywind_tasks (the connection, on a thread of its own, waking the window when a line arrives).
+//
+//   ./out/claywind_chat            then connect to a chat server (../server) as someone
+
+import claywind;
+import claywind_desktop;
+import claywind_fonts;
+import claywind_tasks;
+
+/// The format of the state hot reload keeps: the fields, the theme, whether it was connected.
+const HOT_STATE_VERSION: u32 = 1;
+
+/// The server's host from "host:port".
+fn hostOf(text: StringView) -> String? {
+    let b = text.bytes();
+    for (i in 0..b.length) {
+        if (b[i] == ':') {
+            return String.from(StringView.fromUtf8(b[0..i]) ?? "")!;
+        }
+    }
+    return if (b.length > 0) String.from(text)! else null;
+}
+
+/// The server's port from "host:port" (7700 without one).
+fn portOf(text: StringView) -> u16 {
+    let b = text.bytes();
+    var at: usize? = null;
+    for (i in 0..b.length) {
+        if (b[i] == ':') {
+            at = i;
+        }
+    }
+    var v: u32 = 0;
+    match (at) {
+        Some(i) => {
+            for (c in b[i + 1..b.length]) {
+                if (c >= '0' && c <= '9') {
+                    v = v * 10 + (c - '0') as u32;
+                }
+            }
+        }
+        null => {}
+    }
+    return if (v > 0 && v < 65536) truncate<u16>(v) else 7700;
+}
+
+/// Saves what hot reload keeps.
+fn saveState(dir: StringView, app: borrow ChatApp, dark: bool, connected: bool) {
+    var buffer = [0u8; 2048];
+    var w = SnapshotWriter.over(mut buffer[..], HOT_STATE_VERSION);
+    w.bytes(app.server.buf[0..app.server.len]);
+    w.bytes(app.name.buf[0..app.name.len]);
+    w.bytes(app.draft.buf[0..app.draft.len]);
+    w.bool(dark);
+    w.bool(connected);
+    let ok = hotWriteState(dir, w.written());
+}
+
+/// Restores what saveState kept: whether it did, the theme, and whether to connect again.
+fn restoreState(dir: StringView, app: borrow mut ChatApp) -> [bool; 3] {
+    let data = hotReadState(dir);
+    var r = SnapshotReader.over(data.view(), HOT_STATE_VERSION);
+    var server = [0u8; 256];
+    var name = [0u8; 256];
+    var draft = [0u8; 256];
+    let sn = r.bytesInto(mut server[..]);
+    let nn = r.bytesInto(mut name[..]);
+    let dn = r.bytesInto(mut draft[..]);
+    let dark = r.bool();
+    let connected = r.bool();
+    if (!r.intact()) {
+        return [false, false, false];
+    }
+    app.server.set(StringView.fromUtf8(server[0..sn]) ?? "");
+    app.name.set(StringView.fromUtf8(name[0..nn]) ?? "");
+    app.draft.set(StringView.fromUtf8(draft[0..dn]) ?? "");
+    return [true, dark, connected];
+}
+
+/// The name part of a path.
+fn fileName(path: StringView) -> StringView {
+    let b = path.bytes();
+    var start: usize = 0;
+    for (i in 0..b.length) {
+        if (b[i] == '/' || b[i] == '\\') {
+            start = i + 1;
+        }
+    }
+    return StringView.fromUtf8(b[start..b.length]) ?? "?";
+}
+
+fn main() -> i32 {
+    var app = ChatApp.create();
+    let hotDir = hotDirectory();
+    let resumed: [bool; 3] = match (hotDir) {
+        Some(d) => restoreState(d, mut app),
+        null => [false, false, false],
+    };
+    var window = match (Window.open("ClayWind Chat", 960, 640)) {
+        Ok(w) => w,
+        Err(e) => {
+            Console.writeError("chat: cannot open a window: ");
+            Console.writeErrorLine(windowError(e));
+            return 1;
+        }
+    };
+    var paneStorage = zeros(33554432);
+    var rasterStorage = zeros(301989888);
+    let paneMemory = FixedBufferAllocator.over(mut paneStorage.viewMut());
+    let rasterMemory = FixedBufferAllocator.over(mut rasterStorage.viewMut());
+    var pane = match (Pane.create(paneMemory, 1, 4096, 16384, MAX_PIXELS_WIDTH * MAX_PIXELS_HEIGHT, window.size())) {
+        Ok(p) => p,
+        Err(_) => {
+            Console.writeErrorLine("chat: not enough memory for the UI");
+            return 1;
+        }
+    };
+    var raster = match (Raster.create(rasterMemory, desktopRasterCapacity())) {
+        Ok(r) => r,
+        Err(_) => {
+            Console.writeErrorLine("chat: not enough memory for the renderer");
+            return 1;
+        }
+    };
+    if (!loadSystemFonts(mut raster)) {
+        Console.writeErrorLine("chat: no fonts found; set CLAYWIND_FONT_DIR");
+        return 1;
+    }
+    var systemFonts = SystemFonts.create();
+    var share = RasterShare.create();
+    pane.ui.setDarkMode(if (resumed[0]) resumed[1] else true);
+    pane.ui.setSecondaryIsCommand(match (window.nativeHandle()) {
+        WindowHandle.AppKit(_, _) => true,
+        _ => false,
+    });
+    bindChatKeys(mut pane.ui);
+    // The menus, as the system's (a system without a menu bar goes without: the commands have keys).
+    var menus = MenuModel.create();
+    chatMenu(mut menus);
+    match (systemMenu(menus, pane.ui)) {
+        Ok(menu) => {
+            let shown = window.setMenu(menu);
+        }
+        Err(_) => {}
+    }
+    var drops = Drops.create();
+    // The connection: a job on a thread of its own, and the queue of lines the UI sends through it.
+    var connection = match (Task<Incoming>.create(64, window.waker())) {
+        Ok(t) => t,
+        Err(_) => {
+            Console.writeErrorLine("chat: no memory for the connection");
+            return 1;
+        }
+    };
+    var outgoing: Channel<String>? = null;
+    var connected = false;
+    if (resumed[0] && resumed[2]) {
+        app.wantsConnect = true; // hot reload: connected before, so again
+        app.connecting = true;
+    }
+    let hot: HotWatch? = match (hotDir) {
+        Some(d) => HotWatch.start(d, window.waker()),
+        null => null,
+    };
+    loop {
+        if (pane.takeEvents(mut window)) {
+            break;
+        }
+        let reload = match (borrow hot) {
+            Some(h) => h.reloadAsked(),
+            null => false,
+        };
+        if (reload) {
+            match (hotDir) {
+                Some(d) => { saveState(d, app, pane.ui.isDarkMode(), connected); }
+                null => {}
+            }
+            break;
+        }
+        drops.poll(mut window, mut pane.platform);
+        takeMenuChoices(mut window, menus, mut pane.platform);
+        // The connection's reports.
+        loop {
+            match (connection.poll(mut pane.ui)) {
+                Some(news) => {
+                    if (news.kind == NET_CONNECTED) {
+                        connected = true;
+                        app.connected();
+                    } else if (news.kind == NET_LINE) {
+                        app.receive(news.text.view());
+                    } else {
+                        connected = false;
+                        outgoing = null;
+                        app.disconnected(news.text.view());
+                    }
+                }
+                null => { break; }
+            }
+        }
+        pane.begin(mut window);
+        chatFrame(mut pane.ui, mut app, raster);
+        if (!pane.end(mut window, raster)) {
+            Console.writeErrorLine("chat: the frame does not fit the UI capacity");
+            return 1;
+        }
+        if (systemFonts.supplyFrame(mut raster, pane.ui) > 0) {
+            pane.damage.invalidate();
+        }
+        if (!pane.draw(mut raster, mut share, mut window, Color.hex(chatBackground(pane.ui)))) {
+            Console.writeErrorLine("chat: the window refused a frame");
+            return 1;
+        }
+        pane.platform.endFrame();
+        // What the frame asked for: a connection, its end, files to share, lines to send.
+        if (app.wantsConnect) {
+            app.wantsConnect = false;
+            let server = app.server.trimmed();
+            match (hostOf(server)) {
+                Some(host) => {
+                    match (Channel<String>.create(256)) {
+                        Ok(queue) => {
+                            match (connectJob(host, portOf(server), queue.clone())) {
+                                Ok(job) => {
+                                    match (connection.start(job)) {
+                                        Ok() => { outgoing = queue; }
+                                        Err(_) => { app.disconnected("cannot start the connection"); }
+                                    }
+                                }
+                                Err(_) => { app.disconnected("out of memory"); }
+                            }
+                        }
+                        Err(_) => { app.disconnected("out of memory"); }
+                    }
+                }
+                null => { app.disconnected("Give the server as host:port"); }
+            }
+        }
+        if (app.wantsDisconnect) {
+            app.wantsDisconnect = false;
+            app.send("QUIT");
+        }
+        if (app.dropWanted != 0) {
+            let n = app.dropWanted;
+            app.dropWanted = 0;
+            let room = String.from(app.room())!;
+            match (drops.pathsOf(n)) {
+                Some(paths) => {
+                    for (p in paths.view()) {
+                        if (room.view().length > 0) {
+                            var line = String.create();
+                            line.append("SAY ")!;
+                            line.append(room.view())!;
+                            line.append(" shared a file: ")!;
+                            line.append(fileName(p.view()))!;
+                            app.outgoing.push(line)!;
+                        }
+                    }
+                }
+                null => {}
+            }
+        }
+        match (borrow outgoing) {
+            Some(q) => {
+                for (line in app.outgoing.view()) {
+                    let sent = q.trySend(line.clone()!);
+                }
+            }
+            null => {}
+        }
+        app.outgoing.clear();
+        if (pane.ui.needsFrame()) {
+            window.waitFrame();
+        } else {
+            Window.waitAny(pane.ui.frameDelayMs(IDLE_MS));
+        }
+    }
+    // Leaving: say so to the server; the connection's thread ends with it (the Task's drop waits for it).
+    match (borrow outgoing) {
+        Some(q) => {
+            let quit = q.trySend(String.from("QUIT")!);
+        }
+        null => {}
+    }
+    return 0;
+}

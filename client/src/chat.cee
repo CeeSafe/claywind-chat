@@ -1,0 +1,438 @@
+// SPDX-License-Identifier: MIT
+// The chat client's state and frames: a connect screen (server, name), then the chat (rooms at the left, the room's
+// messages, a line to type in). Lines from the server arrive through `receive`; lines to it are queued with `send`.
+
+import claywind;
+
+/// One line of a room: a message, or a note (someone joined or left), with the server's time.
+public struct ChatLine {
+    public room: String;
+    public name: String;
+    public time: i64;
+    public text: String;
+    public note: bool;
+}
+
+/// The two screens.
+public const SCREEN_CONNECT: u8 = 0;
+public const SCREEN_CHAT: u8 = 1;
+
+/// How many lines are kept in all.
+const KEPT_LINES: usize = 2000;
+
+/// A text field's bytes, caret and selection.
+public struct Field {
+    public buf: [u8; 256];
+    public len: usize;
+    public edit: TextEdit;
+
+    public fn of(text: StringView) -> Field {
+        var f = Field { buf: [0u8; 256], len: 0, edit: TextEdit.at(0) };
+        f.set(text);
+        return f;
+    }
+
+    public fn set(borrow mut this, text: StringView) {
+        let b = text.bytes();
+        let n = b.length.min(256);
+        for (i in 0..n) {
+            this.buf[i] = b[i];
+        }
+        this.len = n;
+        this.edit = TextEdit.at(n);
+    }
+
+    public fn text(borrow this) -> StringView => StringView.fromUtf8(this.buf[0..this.len]) ?? "";
+
+    /// The text with the spaces at its ends dropped.
+    public fn trimmed(borrow this) -> StringView => StringView.fromUtf8(this.buf[0..this.len].trim()) ?? "";
+}
+
+/// Everything the client shows and keeps.
+public struct ChatApp {
+    public screen: u8;
+    public server: Field;
+    public name: Field;
+    public draft: Field;
+    public joinRoom: Field;
+    /// What the status line says (a connection's trouble, a refused line).
+    public status: String;
+    public connecting: bool;
+    public me: String;
+    public rooms: Vector<String>;
+    public current: usize;
+    public lines: Vector<ChatLine>;
+    /// New lines arrived since the last frame: the room's list scrolls to its end.
+    fresh: bool;
+    /// The message box takes the focus at the next frame: after connecting, joining or choosing a room.
+    focusDraft: bool;
+    /// What the frame asks of the host: connect, disconnect, lines to send.
+    public wantsConnect: bool;
+    public wantsDisconnect: bool;
+    public outgoing: Vector<String>;
+    /// Whether the host takes files dropped from the system, and the last drop's number to ask for.
+    public takesFiles: bool;
+    public dropWanted: u64;
+
+    public fn create() -> ChatApp => ChatApp {
+        screen: SCREEN_CONNECT,
+        server: Field.of("127.0.0.1:7700"),
+        name: Field.of(""),
+        draft: Field.of(""),
+        joinRoom: Field.of(""),
+        status: String.create(),
+        connecting: false,
+        me: String.create(),
+        rooms: Vector<String>.create(),
+        current: 0,
+        lines: Vector<ChatLine>.create(),
+        fresh: false,
+        focusDraft: false,
+        wantsConnect: false,
+        wantsDisconnect: false,
+        outgoing: Vector<String>.create(),
+        takesFiles: false,
+        dropWanted: 0,
+    };
+
+    /// Queues `line` for the server.
+    public fn send(borrow mut this, line: StringView) {
+        match (String.from(line)) {
+            Ok(s) => { this.outgoing.push(s)!; }
+            Err(_) => {}
+        }
+    }
+
+    /// Queues the words of `parts` as one line for the server.
+    fn sendWords(borrow mut this, parts: Slice<StringView>) {
+        var s = String.create();
+        for (k in 0..parts.length) {
+            if (k > 0) {
+                s.append(" ")!;
+            }
+            s.append(parts[k])!;
+        }
+        this.outgoing.push(s)!;
+    }
+
+    fn setStatus(borrow mut this, text: StringView) {
+        this.status = String.from(text)!;
+    }
+
+    /// The room shown, if any.
+    public fn room(borrow this) -> StringView =>
+        if (this.current < this.rooms.length) this.rooms[this.current].view() else "";
+
+    /// The connection is up: say who we are, and join the lobby.
+    public fn connected(borrow mut this) {
+        let me = String.from(this.name.trimmed())!;
+        this.sendWords(["HELLO", me.view()][..]);
+        this.sendWords(["JOIN", "lobby"][..]);
+        this.setStatus("Connected");
+    }
+
+    /// The connection ended (`why`): back to the connect screen.
+    public fn disconnected(borrow mut this, why: StringView) {
+        this.connecting = false;
+        this.screen = SCREEN_CONNECT;
+        this.rooms.clear();
+        this.current = 0;
+        this.setStatus(why);
+    }
+
+    /// A line from the server.
+    public fn receive(borrow mut this, line: StringView) {
+        let w = words(line, 5);
+        if (w[0] == "WELCOME") {
+            this.me = String.from(w[1])!;
+            this.connecting = false;
+            this.screen = SCREEN_CHAT;
+            this.focusDraft = true;
+        } else if (w[0] == "ERR") {
+            this.setStatus(rest(line, 1));
+            if (this.screen == SCREEN_CONNECT) {
+                this.wantsDisconnect = true; // a refused name: try another
+            }
+        } else if (w[0] == "MSG" || w[0] == "HISTORY") {
+            this.addLine(w[1], w[2], parseTime(w[3]), rest(line, 4), false);
+        } else if (w[0] == "JOINED") {
+            if (w[2] == this.me.view() && !this.hasRoom(w[1])) {
+                this.rooms.push(String.from(w[1])!)!;
+                this.current = this.rooms.length - 1;
+                this.focusDraft = true;
+            }
+            var t = String.create();
+            t.append(w[2])!;
+            t.append(" joined")!;
+            this.addLine(w[1], "", 0, t.view(), true);
+        } else if (w[0] == "LEFT") {
+            var t = String.create();
+            t.append(w[2])!;
+            t.append(" left")!;
+            this.addLine(w[1], "", 0, t.view(), true);
+        }
+    }
+
+    fn hasRoom(borrow this, room: StringView) -> bool {
+        for (r in this.rooms.view()) {
+            if (r.view() == room) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn addLine(borrow mut this, room: StringView, name: StringView, time: i64, text: StringView, note: bool) {
+        if (this.lines.length >= KEPT_LINES) {
+            let dropped = this.lines.remove(0);
+        }
+        this.lines.push(ChatLine {
+            room: String.from(room)!,
+            name: String.from(name)!,
+            time: time,
+            text: String.from(text)!,
+            note: note,
+        })!;
+        this.fresh = true;
+    }
+}
+
+/// The first `n - 1` space-separated words of `line`, and what follows them as the last.
+fn words(line: StringView, n: usize) -> [StringView; 5] {
+    var out = ["", "", "", "", ""];
+    let b = line.bytes();
+    var start: usize = 0;
+    var k: usize = 0;
+    for (i in 0..b.length) {
+        if (b[i] == ' ' && k + 1 < n) {
+            out[k] = StringView.fromUtf8(b[start..i]) ?? "";
+            k += 1;
+            start = i + 1;
+        }
+    }
+    if (k < 5) {
+        out[k] = StringView.fromUtf8(b[start..b.length]) ?? "";
+    }
+    return out;
+}
+
+/// What follows the first `skip` words of `line`.
+fn rest(line: StringView, skip: usize) -> StringView {
+    let b = line.bytes();
+    var seen: usize = 0;
+    for (i in 0..b.length) {
+        if (b[i] == ' ') {
+            seen += 1;
+            if (seen == skip) {
+                return StringView.fromUtf8(b[i + 1..b.length]) ?? "";
+            }
+        }
+    }
+    return "";
+}
+
+fn parseTime(t: StringView) -> i64 {
+    var v: i64 = 0;
+    for (c in t.bytes()) {
+        if (c >= '0' && c <= '9') {
+            v = v * 10 + (c - '0') as i64;
+        }
+    }
+    return v;
+}
+
+/// "HH:MM" of a Unix time (UTC).
+fn clock(time: i64, w: borrow mut TextWriter) {
+    let day = time % 86400;
+    let h = day / 3600;
+    let m = (day % 3600) / 60;
+    if (h < 10) {
+        w.byte('0');
+    }
+    w.signed(h);
+    w.byte(':');
+    if (m < 10) {
+        w.byte('0');
+    }
+    w.signed(m);
+}
+
+// ---- frames ---------------------------------------------------------------------------------------------------------
+
+/// The page's background.
+public fn chatBackground(ui: borrow Ui) -> u32 => if (ui.isDarkMode()) SLATE_950 else SLATE_50;
+fn panel(ui: borrow Ui) -> u32 => if (ui.isDarkMode()) SLATE_900 else WHITE;
+fn ink(ui: borrow Ui) -> u32 => if (ui.isDarkMode()) SLATE_100 else SLATE_900;
+fn muted(ui: borrow Ui) -> u32 => if (ui.isDarkMode()) SLATE_400 else SLATE_500;
+
+/// One frame of the client.
+public fn chatFrame<M: TextMetrics>(ui: borrow mut Ui, app: borrow mut ChatApp, metrics: borrow M) {
+    if (ui.action("toggle-theme")) {
+        let dark = ui.isDarkMode();
+        ui.setDarkMode(!dark);
+    }
+    if (ui.action("disconnect") && app.screen == SCREEN_CHAT) {
+        app.wantsDisconnect = true;
+    }
+    ui.open(Style.column().id("root").w(Size.grow()).h(Size.grow()).bg(chatBackground(ui)));
+    if (app.screen == SCREEN_CONNECT) {
+        connectScreen(mut ui, mut app, metrics);
+    } else {
+        chatScreen(mut ui, mut app, metrics);
+    }
+    ui.close();
+}
+
+fn connectScreen<M: TextMetrics>(ui: borrow mut Ui, app: borrow mut ChatApp, metrics: borrow M) {
+    ui.open(Style.column().w(Size.grow()).h(Size.grow()).alignXY(AxisAlign.Center, AxisAlign.Center));
+    ui.open(Style.column().w(Size.fixed(380.0)).p(space(8.0)).gap(space(3.0)).bg(panel(ui)).rounded(Radius.Xl));
+    ui.label("ClayWind Chat", Text.of().font(TEXT_XL).color(ink(ui)).bold());
+    ui.label("Server", Text.of().color(muted(ui)));
+    Controls.textField(mut ui, metrics, "server", mut app.server.buf[..], mut app.server.len, mut app.server.edit);
+    ui.label("Your name", Text.of().color(muted(ui)));
+    let enter = ui.keyPressed(Key.Enter) && ui.hasFocusNamed("name");
+    Controls.textField(mut ui, metrics, "name", mut app.name.buf[..], mut app.name.len, mut app.name.edit);
+    let label = if (app.connecting) "Connecting…" else "Connect";
+    if ((Controls.button(mut ui, "connect", label) || enter) && !app.connecting) {
+        if (app.name.trimmed().length == 0) {
+            app.setStatus("Choose a name first");
+        } else {
+            app.wantsConnect = true;
+            app.connecting = true;
+            app.setStatus("");
+        }
+    }
+    if (app.status.view().length > 0) {
+        ui.label(app.status.view(), Text.of().color(muted(ui)));
+    }
+    ui.close();
+    ui.close();
+}
+
+fn chatScreen<M: TextMetrics>(ui: borrow mut Ui, app: borrow mut ChatApp, metrics: borrow M) {
+    ui.open(Style.row().w(Size.grow()).h(Size.grow()));
+    // The rooms.
+    ui.open(Style.column().w(Size.fixed(210.0)).h(Size.grow()).bg(panel(ui)).p(space(3.0)).gap(space(1.0)));
+    ui.label(app.me.view(), Text.of().color(ink(ui)).bold());
+    ui.label("Rooms", Text.of().color(muted(ui)));
+    for (k in 0..app.rooms.length) {
+        var idb = [0u8; 40];
+        var iw = TextWriter.create(mut idb[..]);
+        iw.text("room-");
+        iw.text(app.rooms[k].view());
+        let id = StringView.fromUtf8(iw.written()) ?? "room";
+        let selected = k == app.current;
+        ui.open(Style.box().id(id).w(Size.grow()).px(space(3.0)).py(space(1.5)).rounded(Radius.Md)
+            .cursor(Cursor.Pointer).bg(if (selected) BLUE_600 else NONE).hover(
+            Style.of().bg(if (selected) BLUE_600 else SLATE_700),
+        ));
+        if (ui.clicked(id)) {
+            app.current = k;
+            app.fresh = true;
+            app.focusDraft = true;
+        }
+        var nb = [0u8; 40];
+        var nw = TextWriter.create(mut nb[..]);
+        nw.byte('#');
+        nw.text(app.rooms[k].view());
+        ui.labelBytes(nw.written(), Text.of().color(if (selected) WHITE else ink(ui)));
+        ui.close();
+    }
+    ui.open(Style.box().h(Size.grow()));
+    ui.close();
+    let joinEnter = ui.keyPressed(Key.Enter) && ui.hasFocusNamed("join");
+    Controls.textField(mut ui, metrics, "join", mut app.joinRoom.buf[..], mut app.joinRoom.len, mut app.joinRoom.edit);
+    if ((Controls.button(mut ui, "join-btn", "Join room") || joinEnter) && app.joinRoom.trimmed().length > 0) {
+        let room = String.from(app.joinRoom.trimmed())!;
+        app.sendWords(["JOIN", room.view()][..]);
+        app.joinRoom.set("");
+    }
+    ui.close();
+    // The room.
+    ui.open(Style.column().w(Size.grow()).h(Size.grow()).p(space(4.0)).gap(space(3.0)));
+    var title = [0u8; 40];
+    var tw = TextWriter.create(mut title[..]);
+    tw.byte('#');
+    tw.text(app.room());
+    ui.labelBytes(tw.written(), Text.of().font(TEXT_XL).color(ink(ui)).bold());
+    let target = ui.dropTarget(hashId("messages"), DRAG_FILES);
+    let over = match (target) {
+        DropState.Over(_) => true,
+        _ => false,
+    };
+    match (target) {
+        DropState.Dropped(p) => { app.dropWanted = p.value; }
+        _ => {}
+    }
+    ui.open(Style.column().id("messages").w(Size.grow()).h(Size.grow()).p(space(3.0)).gap(space(2.0))
+        .scroll(ScrollAxis.Vertical).bg(panel(ui)).rounded(Radius.Lg)
+        .border(1.0, if (over) EMERALD_500 else NONE));
+    let roomName = String.from(app.room())!;
+    let room = roomName.view();
+    for (l in app.lines.view()) {
+        if (l.room.view() != room) {
+            continue;
+        }
+        if (l.note) {
+            ui.label(l.text.view(), Text.of().color(muted(ui)));
+            continue;
+        }
+        ui.open(Style.column().w(Size.grow()).gap(space(0.5)));
+        ui.open(Style.row().gap(space(2.0)).alignXY(AxisAlign.Start, AxisAlign.End));
+        ui.label(l.name.view(), Text.of().color(ink(ui)).bold());
+        var tb = [0u8; 8];
+        var t = TextWriter.create(mut tb[..]);
+        clock(l.time, mut t);
+        ui.labelBytes(t.written(), Text.of().color(muted(ui)));
+        ui.close();
+        ui.label(l.text.view(), Text.of().color(ink(ui)).wrap(TextWrap.Words));
+        ui.close();
+    }
+    ui.close();
+    if (app.fresh) {
+        ui.scrollToBottom("messages");
+        app.fresh = false;
+    }
+    // The line to type in: Enter or Send sends it.
+    ui.open(Style.row().w(Size.grow()).gap(space(2.0)).alignXY(AxisAlign.Start, AxisAlign.Center));
+    let sendEnter = ui.keyPressed(Key.Enter) && ui.hasFocusNamed("draft");
+    ui.open(Style.box().w(Size.grow()));
+    if (app.focusDraft) {
+        app.focusDraft = false;
+        ui.setFocus(hashId("draft"));
+    }
+    Controls.textField(mut ui, metrics, "draft", mut app.draft.buf[..], mut app.draft.len, mut app.draft.edit);
+    ui.close();
+    if ((Controls.button(mut ui, "send", "Send") || sendEnter) && app.draft.trimmed().length > 0 && room.length > 0) {
+        let text = String.from(app.draft.trimmed())!;
+        app.sendWords(["SAY", room, text.view()][..]);
+        app.draft.set("");
+        ui.setFocus(hashId("draft")); // Enter ends the field's focus: keep typing
+    }
+    ui.close();
+    if (app.status.view().length > 0 && app.status.view() != "Connected") {
+        ui.label(app.status.view(), Text.of().color(muted(ui)));
+    }
+    ui.close();
+    ui.close();
+}
+
+/// The client's menus.
+public fn chatMenu<B: MenuBuilder>(m: borrow mut B) {
+    m.menu("Chat");
+    m.item("Disconnect", "disconnect");
+    m.menu("Edit");
+    m.item("Cut", "cut");
+    m.item("Copy", "copy");
+    m.item("Paste", "paste");
+    m.separator();
+    m.item("Select All", "select-all");
+    m.menu("View");
+    m.item("Toggle Light Mode", "toggle-theme");
+}
+
+/// Binds the menus' actions' keys (once, on the first frame).
+public fn bindChatKeys(ui: borrow mut Ui) {
+    ui.bind("secondary-shift-l", "toggle-theme", "");
+    ui.bind("secondary-shift-d", "disconnect", "");
+}

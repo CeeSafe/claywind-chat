@@ -1,0 +1,29 @@
+# Written by ceesafec fetch (spec/tooling.md §4.3). Commit it with ceesafe.toml.
+
+[[package]]
+name = "claywind"
+source = "git+https://github.com/CeeSafe/Clay.git"
+commit = "91431cfca0eca7c230b0a7b3561528c363aabf33"
+dir = "claywind"
+hash = "sha256:3a7d0732e479e6a97a22e2d345854640cacd31529f914ef292d4c8948839edd3"
+
+[[package]]
+name = "claywind_desktop"
+source = "git+https://github.com/CeeSafe/Clay.git"
+commit = "91431cfca0eca7c230b0a7b3561528c363aabf33"
+dir = "claywind-desktop"
+hash = "sha256:7bf6910dbe19ed89210d9c08d0e0ab4a04ee261950acbc4c78f98b478828fa7a"
+
+[[package]]
+name = "claywind_fonts"
+source = "git+https://github.com/CeeSafe/Clay.git"
+commit = "91431cfca0eca7c230b0a7b3561528c363aabf33"
+dir = "claywind-fonts"
+hash = "sha256:5d843aac56e9a3154ab077124f8b7c4bf415cfb699bc78e5dbf4022255512814"
+
+[[package]]
+name = "claywind_tasks"
+source = "git+https://github.com/CeeSafe/Clay.git"
+commit = "91431cfca0eca7c230b0a7b3561528c363aabf33"
+dir = "claywind-tasks"
+hash = "sha256:4e816789d7254007ed8eaa685098c14d5f8ab24dd5d08eb763e73addbff21681"

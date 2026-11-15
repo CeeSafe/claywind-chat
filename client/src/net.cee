@@ -1,0 +1,124 @@
+// SPDX-License-Identifier: MIT
+// The connection to the chat server, on a thread of its own (claywind_tasks' Task): it connects, then reads the
+// server's lines and sends them to the UI thread, which they wake, while it writes the lines the UI queues. The UI
+// never waits on the network.
+
+import claywind_tasks;
+
+/// What the connection reports to the UI.
+public const NET_CONNECTED: u8 = 1;
+public const NET_LINE: u8 = 2;
+public const NET_CLOSED: u8 = 3;
+
+/// One report: what happened, and the line (or why the connection ended).
+public struct Incoming {
+    public kind: u8;
+    public text: String;
+}
+
+/// Sends a report to the UI thread. TaskSender.send waits while the UI is behind, which an async task may not do, so
+/// it runs on a worker (Async.blocking). False once the job is cancelled.
+async fn report(out: borrow TaskSender<Incoming>, kind: u8, text: StringView) -> bool {
+    return await Async.blocking(() => match (String.from(text)) {
+        Ok(line) => out.send(Incoming { kind: kind, text: line }),
+        Err(_) => false,
+    });
+}
+
+/// Reads the server's lines and reports each, until the connection ends.
+async fn readLines(stream: borrow AsyncTcpStream, out: borrow TaskSender<Incoming>) -> Result<void, AsyncError> {
+    var pending = Vector<u8>.create();
+    var chunk = [0u8; 4096];
+    loop {
+        let n = await stream.read(mut chunk[..])?;
+        if (n == 0) {
+            return Ok();
+        }
+        for (i in 0usize..n) {
+            pending.push(chunk[i])!;
+        }
+        loop {
+            var end: usize? = null;
+            for (i in 0..pending.length) {
+                if (pending[i] == '\n') {
+                    end = i;
+                    break;
+                }
+            }
+            let e = match (end) {
+                Some(x) => x,
+                null => { break; }
+            };
+            var stop = e;
+            if (stop > 0 && pending[stop - 1] == '\r') {
+                stop -= 1;
+            }
+            match (StringView.fromUtf8(pending[0..stop])) {
+                Some(line) => {
+                    if (!(await report(out, NET_LINE, line))) {
+                        return Ok(); // the UI cancelled the connection
+                    }
+                }
+                null => {}
+            }
+            let rest = pending.length - (e + 1);
+            for (i in 0..rest) {
+                pending[i] = pending[e + 1 + i];
+            }
+            pending.truncate(rest);
+        }
+    }
+}
+
+/// Writes the lines the UI queues, until the queue is closed.
+async fn writeLines(stream: borrow AsyncTcpStream, outgoing: borrow Channel<String>) -> Result<void, AsyncError> {
+    loop {
+        match (await outgoing.recvAsync()?) {
+            Some(line) => {
+                await stream.write(line.view().bytes())?;
+                await stream.write("\n".bytes())?;
+            }
+            null => { return Ok(); }
+        }
+    }
+}
+
+/// A session: connect, report it, then read and write at once until the connection ends.
+async fn session(
+    host: borrow String,
+    port: u16,
+    outgoing: borrow Channel<String>,
+    out: borrow TaskSender<Incoming>,
+) -> Result<void, AsyncError> {
+    let stream = await AsyncTcpStream.connect(host.view(), port)?;
+    if (!(await report(out, NET_CONNECTED, ""))) {
+        return Ok();
+    }
+    await Async.scope(AsyncError.Cancelled, (s) => {
+        s.spawn(async () => await readLines(stream, out));
+        s.spawn(async () => await writeLines(stream, outgoing));
+    })?;
+    return Ok();
+}
+
+/// The job that connects to `host`:`port` and carries the lines both ways; `outgoing` is what the UI queues.
+public fn connectJob(
+    host: String,
+    port: u16,
+    outgoing: Channel<String>,
+) -> Result<Box<dyn mut fn(borrow TaskSender<Incoming>) + Send>, AllocError> {
+    return Ok(Box.create(move (out: borrow TaskSender<Incoming>) => {
+        let ended = Async.run(session(host, port, outgoing, out));
+        let why = match (ended) {
+            Ok() => "the server closed the connection",
+            Err(AsyncError.Io(_)) => "cannot reach the server",
+            Err(_) => "the connection ended",
+        };
+        match (String.from(why)) {
+            Ok(s) => {
+                let told = out.send(Incoming { kind: NET_CLOSED, text: s });
+            }
+            Err(_) => {}
+        }
+    })?);
+}
