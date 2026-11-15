@@ -1,0 +1,410 @@
+// SPDX-License-Identifier: MIT
+// The chat server: rooms of people talking over TCP, in the line protocol of PROTOCOL.md.
+//
+//   ./out/chat_server [port]        (7700 by default; it listens on every address)
+//
+// One task per connection, under one task set: each reads its client's lines and acts on them, and a child writes
+// what the hub queues for it. The hub (who is here, in which rooms, and each room's last messages) is shared by the
+// tasks behind an AsyncMutex; nothing waits while holding it.
+
+/// How many clients may be connected at once.
+const MAX_CLIENTS: u32 = 256;
+/// The longest line accepted, in bytes.
+const MAX_LINE: usize = 4096;
+/// How many of a room's last messages a newcomer is sent.
+const HISTORY: usize = 50;
+/// How many lines may wait for a slow client before it is dropped.
+const OUTBOX: usize = 512;
+
+/// Someone connected: who, the lines waiting for them, and the rooms they are in.
+struct Member {
+    id: u64;
+    name: String;
+    outbox: Channel<String>;
+    rooms: Vector<String>;
+}
+
+/// A message said in a room.
+struct Said {
+    room: String;
+    name: String;
+    time: i64;
+    text: String;
+}
+
+/// Everyone connected, and every room's last messages.
+struct Hub {
+    members: Vector<Member>;
+    said: Vector<Said>;
+    nextId: u64;
+
+    fn create() -> Hub => Hub { members: Vector<Member>.create(), said: Vector<Said>.create(), nextId: 1 };
+
+    /// The member numbered `id`, if still here.
+    fn index(borrow this, id: u64) -> usize? {
+        for (k in 0..this.members.length) {
+            if (this.members[k].id == id) {
+                return k;
+            }
+        }
+        return null;
+    }
+
+    /// Whether someone named `name` is here.
+    fn named(borrow this, name: StringView) -> bool {
+        for (m in this.members.view()) {
+            if (m.name.view() == name) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Queues `line` for everyone in `room`.
+    fn tellRoom(borrow this, room: StringView, line: StringView) {
+        for (m in this.members.view()) {
+            if (inRoom(m, room)) {
+                tell(m, line);
+            }
+        }
+    }
+
+    /// How many are in `room`.
+    fn count(borrow this, room: StringView) -> u64 {
+        var n: u64 = 0;
+        for (m in this.members.view()) {
+            if (inRoom(m, room)) {
+                n += 1;
+            }
+        }
+        return n;
+    }
+}
+
+/// Whether `m` is in `room`.
+fn inRoom(m: borrow Member, room: StringView) -> bool {
+    for (r in m.rooms.view()) {
+        if (r.view() == room) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Queues `line` for `m` (a client that has fallen OUTBOX lines behind misses it).
+fn tell(m: borrow Member, line: StringView) {
+    match (String.from(line)) {
+        Ok(s) => {
+            let ignored = m.outbox.trySend(s);
+        }
+        Err(_) => {}
+    }
+}
+
+/// `parts` joined by single spaces.
+fn joined(parts: Slice<StringView>) -> String {
+    var s = String.create();
+    for (k in 0..parts.length) {
+        if (k > 0) {
+            s.append(" ")!;
+        }
+        s.append(parts[k])!;
+    }
+    return s;
+}
+
+/// Whether `name` is a valid name or room: 1 to 24 letters, digits, `-` or `_`.
+fn validName(name: StringView) -> bool {
+    let b = name.bytes();
+    if (b.length == 0 || b.length > 24) {
+        return false;
+    }
+    for (c in b) {
+        let ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+        if (!ok) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The first word of `line` and the rest after one space.
+fn split(line: StringView) -> [StringView; 2] {
+    let b = line.bytes();
+    for (i in 0..b.length) {
+        if (b[i] == ' ') {
+            return [StringView.fromUtf8(b[0..i]) ?? "", StringView.fromUtf8(b[i + 1..b.length]) ?? ""];
+        }
+    }
+    return [line, ""];
+}
+
+/// `n` in decimal.
+fn decimal(n: i64) -> String {
+    var b = [0u8; 24];
+    var w = TextWriter.create(mut b[..]);
+    w.signed(n);
+    return String.from(StringView.fromUtf8(w.written()) ?? "0")!;
+}
+
+/// Acts on one line from member `id` (named `name` once HELLO has been accepted). False when the client is done.
+async fn handle(hub: borrow Arc<AsyncMutex<Hub>>, id: u64, line: StringView) -> Result<bool, AsyncError> {
+    var guard = await hub.get().lock()?;
+    let h = guard.data();
+    let k = match (h.index(id)) {
+        Some(i) => i,
+        null => { return Ok(false); }
+    };
+    let word = split(line);
+    let named = h.members[k].name.view().length > 0;
+    if (word[0] == "QUIT") {
+        return Ok(false);
+    }
+    if (word[0] == "HELLO") {
+        if (named) {
+            tell(h.members[k], "ERR you have a name already");
+        } else if (!validName(word[1])) {
+            tell(h.members[k], "ERR a name is 1 to 24 letters, digits, - or _");
+        } else if (h.named(word[1])) {
+            tell(h.members[k], "ERR that name is taken");
+        } else {
+            h.members[k].name = String.from(word[1])!;
+            let reply = joined(["WELCOME", word[1]][..]);
+            tell(h.members[k], reply.view());
+        }
+        return Ok(true);
+    }
+    if (!named) {
+        tell(h.members[k], "ERR say HELLO <name> first");
+        return Ok(true);
+    }
+    let name = h.members[k].name.clone()!;
+    if (word[0] == "JOIN") {
+        let room = word[1];
+        if (!validName(room)) {
+            tell(h.members[k], "ERR a room is 1 to 24 letters, digits, - or _");
+        } else if (!inRoom(h.members[k], room)) {
+            for (said in h.said.view()) {
+                if (said.room.view() == room) {
+                    let t = decimal(said.time);
+                    let past = joined(["HISTORY", room, said.name.view(), t.view(), said.text.view()][..]);
+                    tell(h.members[k], past.view());
+                }
+            }
+            h.members[k].rooms.push(String.from(room)!)!;
+            let news = joined(["JOINED", room, name.view()][..]);
+            h.tellRoom(room, news.view());
+        }
+        return Ok(true);
+    }
+    if (word[0] == "LEAVE") {
+        let room = word[1];
+        if (inRoom(h.members[k], room)) {
+            let news = joined(["LEFT", room, name.view()][..]);
+            h.tellRoom(room, news.view());
+            h.members[k].rooms.retain((r) => r.view() != room);
+        }
+        return Ok(true);
+    }
+    if (word[0] == "SAY") {
+        let rest = split(word[1]);
+        let room = rest[0];
+        if (!inRoom(h.members[k], room)) {
+            tell(h.members[k], "ERR join the room first");
+        } else if (rest[1].length == 0) {
+            tell(h.members[k], "ERR say something");
+        } else {
+            let time = Clock.now().seconds;
+            let t = decimal(time);
+            let msg = joined(["MSG", room, name.view(), t.view(), rest[1]][..]);
+            h.tellRoom(room, msg.view());
+            h.said.push(Said { room: String.from(room)!, name: name, time: time, text: String.from(rest[1])! })!;
+            // Keep each room's last HISTORY messages: drop the oldest of this room past that.
+            var inThisRoom: usize = 0;
+            for (s in h.said.view()) {
+                if (s.room.view() == room) {
+                    inThisRoom += 1;
+                }
+            }
+            if (inThisRoom > HISTORY) {
+                for (j in 0..h.said.length) {
+                    if (h.said[j].room.view() == room) {
+                        let dropped = h.said.remove(j);
+                        break;
+                    }
+                }
+            }
+        }
+        return Ok(true);
+    }
+    if (word[0] == "ROOMS") {
+        var seen = Vector<String>.create();
+        for (m in h.members.view()) {
+            for (r in m.rooms.view()) {
+                var known = false;
+                for (s in seen.view()) {
+                    if (s.view() == r.view()) {
+                        known = true;
+                    }
+                }
+                if (!known) {
+                    seen.push(r.clone()!)!;
+                }
+            }
+        }
+        for (r in seen.view()) {
+            let n = decimal(truncate<i64>(h.count(r.view())));
+            let line2 = joined(["ROOM", r.view(), n.view()][..]);
+            tell(h.members[k], line2.view());
+        }
+        tell(h.members[k], "ROOMS-END");
+        return Ok(true);
+    }
+    tell(h.members[k], "ERR unknown command");
+    return Ok(true);
+}
+
+/// Writes the lines queued for a client until its outbox is closed.
+async fn writer(stream: borrow AsyncTcpStream, outbox: borrow Channel<String>) -> Result<void, AsyncError> {
+    loop {
+        match (await outbox.recvAsync()?) {
+            Some(line) => {
+                await stream.write(line.view().bytes())?;
+                await stream.write("\n".bytes())?;
+            }
+            null => { return Ok(); }
+        }
+    }
+}
+
+/// Reads a client's lines and acts on them until it quits or goes; then it leaves every room.
+async fn reader(stream: borrow AsyncTcpStream, hub: borrow Arc<AsyncMutex<Hub>>, id: u64) -> Result<void, AsyncError> {
+    var pending = Vector<u8>.create();
+    var chunk = [0u8; 4096];
+    var going = true;
+    while (going) {
+        let n = match (await stream.read(mut chunk[..])) {
+            Ok(k) => k,
+            Err(_) => 0,
+        };
+        if (n == 0) {
+            break;
+        }
+        for (i in 0usize..n) {
+            pending.push(chunk[i])!;
+        }
+        // Each whole line in what came.
+        loop {
+            var end: usize? = null;
+            for (i in 0..pending.length) {
+                if (pending[i] == '\n') {
+                    end = i;
+                    break;
+                }
+            }
+            let e = match (end) {
+                Some(x) => x,
+                null => { break; }
+            };
+            var stop = e;
+            if (stop > 0 && pending[stop - 1] == '\r') {
+                stop -= 1;
+            }
+            let ok = match (StringView.fromUtf8(pending[0..stop])) {
+                Some(line) => if (line.length <= MAX_LINE) await handle(hub, id, line)? else true,
+                null => true,
+            };
+            // Keep what follows the line.
+            let rest = pending.length - (e + 1);
+            for (i in 0..rest) {
+                pending[i] = pending[e + 1 + i];
+            }
+            pending.truncate(rest);
+            if (!ok) {
+                going = false;
+                break;
+            }
+        }
+        if (pending.length > MAX_LINE) {
+            break; // a line too long: the client is dropped
+        }
+    }
+    // Gone: out of every room, and the writer told to stop.
+    var guard = await hub.get().lock()?;
+    let h = guard.data();
+    match (h.index(id)) {
+        Some(k) => {
+            let m = h.members.remove(k);
+            for (r in m.rooms.view()) {
+                let news = joined(["LEFT", r.view(), m.name.view()][..]);
+                h.tellRoom(r.view(), news.view());
+            }
+            m.outbox.close();
+        }
+        null => {}
+    }
+    return Ok();
+}
+
+/// One connection: a member of the hub, read and written by two children.
+async fn serve(stream: AsyncTcpStream, hub: Arc<AsyncMutex<Hub>>) -> Result<void, AsyncError> {
+    let outbox = match (Channel<String>.create(OUTBOX)) {
+        Ok(c) => c,
+        Err(_) => { return Ok(); }
+    };
+    var id: u64 = 0;
+    {
+        var guard = await hub.get().lock()?;
+        let h = guard.data();
+        id = h.nextId;
+        h.nextId += 1;
+        h.members.push(
+            Member { id: id, name: String.create(), outbox: outbox.clone(), rooms: Vector<String>.create() },
+        )!;
+    }
+    await Async.scope(AsyncError.Cancelled, (s) => {
+        s.spawn(async () => await writer(stream, outbox));
+        s.spawn(async () => await reader(stream, hub, id));
+    })?;
+    return Ok();
+}
+
+/// Accepts connections until the process is stopped.
+async fn run(port: u16) -> Result<void, AsyncError> {
+    let listener = AsyncTcpListener.bind("0.0.0.0", port)?;
+    let hub = Arc<AsyncMutex<Hub>>.create(AsyncMutex<Hub>.create(Hub.create())!)!;
+    await AsyncConsole.writeLine("chat server: listening")?;
+    await Async.tasks(MAX_CLIENTS, AsyncError.Cancelled, async (set) => {
+        loop {
+            let stream = await listener.accept()?;
+            let shared = hub.clone();
+            await set.spawn(async move () => await serve(stream, shared))?;
+        }
+    })?;
+    return Ok();
+}
+
+fn main() -> i32 {
+    var port: u16 = 7700;
+    match (Process.argument(1)) {
+        Some(a) => {
+            var v: u32 = 0;
+            for (c in a.bytes()) {
+                if (c >= '0' && c <= '9') {
+                    v = v * 10 + (c - '0') as u32;
+                }
+            }
+            if (v > 0 && v < 65536) {
+                port = truncate<u16>(v);
+            }
+        }
+        null => {}
+    }
+    return match (Async.run(run(port))) {
+        Ok() => 0,
+        Err(_) => {
+            Console.writeErrorLine("chat server: stopped by an error (is the port in use?)");
+            1
+        }
+    };
+}
