@@ -3,7 +3,7 @@ name = "claywind_chat"
 version = "0.1.0"
 kind = "executable"
 windowed = true # a GUI program: no console window on Windows
-ceesafec = ">=0.62.1"
+ceesafec = ">=0.63.0"
 
 [dependencies]
 claywind = { git = "https://github.com/CeeSafe/Clay.git", branch = "main", dir = "claywind" }

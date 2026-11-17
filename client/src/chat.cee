@@ -307,6 +307,9 @@ fn connectScreen<M: TextMetrics>(ui: borrow mut Ui, app: borrow mut ChatApp, met
     ui.label("Your name", Text.of().color(muted(ui)));
     let enter = ui.keyPressed(Key.Enter) && ui.hasFocusNamed("name");
     Controls.textField(mut ui, metrics, "name", mut app.name.buf[..], mut app.name.len, mut app.name.edit);
+    if (ui.hasFocusNamed("name")) {
+        ui.reportReturnKey(ReturnKey.Go); // Enter in the name connects
+    }
     let label = if (app.connecting) "Connecting…" else "Connect";
     if ((Controls.button(mut ui, "connect", label) || enter) && !app.connecting) {
         if (app.name.trimmed().length == 0) {
@@ -449,6 +452,9 @@ fn chatScreen<M: TextMetrics>(ui: borrow mut Ui, app: borrow mut ChatApp, metric
         ui.setFocus(hashId("draft"));
     }
     Controls.textField(mut ui, metrics, "draft", mut app.draft.buf[..], mut app.draft.len, mut app.draft.edit);
+    if (ui.hasFocusNamed("draft")) {
+        ui.reportReturnKey(ReturnKey.Send);
+    }
     ui.close();
     if ((Controls.button(mut ui, "send", "Send") || sendEnter) && app.draft.trimmed().length > 0 && room.length > 0) {
         let text = String.from(app.draft.trimmed())!;

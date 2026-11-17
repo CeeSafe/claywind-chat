@@ -14,7 +14,7 @@ runtime phase: what a real desktop app needs, and whether ClayWind gives it.
 
 ## Running the server
 
-Install the CeeSafe compiler (`ceesafec` 0.62.1 or later), then:
+Install the CeeSafe compiler (`ceesafec` 0.63.0 or later), then:
 
 ```sh
 cd server && ceesafec build && ./out/chat_server 7700
@@ -28,7 +28,7 @@ printf 'HELLO ada\nJOIN lobby\nSAY lobby hello\n' | nc 127.0.0.1 7700
 
 ## Running the client
 
-The client needs `ceesafec` 0.62.1 or later (0.55.0 for what follows, 0.62.1 for a phone): its dependencies are packages in subdirectories of the ClayWind repository
+The client needs `ceesafec` 0.63.0 or later (0.55.0 for what follows, 0.63.0 for a phone): its dependencies are packages in subdirectories of the ClayWind repository
 (CeeSafe's ADR 0152), it shows times in the local time zone (ADR 0153), and on Windows 0.55.0 fixes fetching git
 dependencies and a first connection. Then, with a server running:
 
