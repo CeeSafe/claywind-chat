@@ -185,6 +185,26 @@ fn main() -> i32 {
         app.wantsConnect = true; // hot reload: connected before, so again
         app.connecting = true;
     }
+    // CLAYWIND_CHAT_PREVIEW: the chat screen at once, with lines of its own and no server, to look at the screen (its
+    // fonts, its layout) where no server can be reached.
+    if (Environment.variable("CLAYWIND_CHAT_PREVIEW") != null) {
+        let lines: [StringView; 9] = [
+            "WELCOME you",
+            "JOINED lobby you",
+            "JOINED design you",
+            "HISTORY lobby ada 1794901563 Hello! This is the preview: no server is connected.",
+            "JOINED lobby grace",
+            "MSG lobby grace 1794901620 The quick brown fox jumps over the lazy dog. 0123456789",
+            "MSG lobby ada 1794901683 Voilà, ça marche — naïve café, Ελληνικά, Кириллица",
+            "MSG lobby grace 1794901742 مرحبا بالعالم · 你好，世界 · 😀🎉",
+            "MSG lobby you 1794901801 A longer line, to see how a message wraps when it does not fit the width of a phone's screen.",
+        ];
+        for (line in lines[..]) {
+            app.receive(line);
+        }
+        app.focusDraft = false; // the keyboard stays down: the screen is to be looked at
+        app.current = 0;        // the first room, which has the lines
+    }
     let hot: HotWatch? = match (hotDir) {
         Some(d) => HotWatch.start(d, window.waker()),
         null => null,
