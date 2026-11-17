@@ -101,7 +101,7 @@ fn fileName(path: StringView) -> StringView {
 fn main() -> i32 {
     var app = ChatApp.create();
     let hotDir = hotDirectory();
-    let resumed: [bool; 3] = match (hotDir) {
+    var resumed: [bool; 3] = match (hotDir) {
         Some(d) => restoreState(d, mut app),
         null => [false, false, false],
     };
@@ -113,6 +113,24 @@ fn main() -> i32 {
             return 1;
         }
     };
+    // On a phone the system may end the app while it is off the screen, without a word: the app saves where it is
+    // each time it leaves the screen (CeeSafe ADR 0159), in its own data folder, and starts from that, connecting
+    // again if it was connected. A desktop gives no such event.
+    let phone = match (window.nativeHandle()) {
+        WindowHandle.UIKit(_, _) => true,
+        WindowHandle.Android(_, _) => true,
+        _ => false,
+    };
+    var keptIn: String? = null;
+    if (phone && hotDir == null) {
+        match (Directory.appData("claywind-chat")) {
+            Ok(folder) => {
+                resumed = restoreState(folder.view(), mut app);
+                keptIn = folder;
+            }
+            Err(_) => {}
+        }
+    }
     var paneStorage = zeros(33554432);
     var rasterStorage = zeros(301989888);
     let paneMemory = FixedBufferAllocator.over(mut paneStorage.viewMut());
@@ -185,6 +203,19 @@ fn main() -> i32 {
                 null => {}
             }
             break;
+        }
+        loop {
+            match (window.nextAppEvent()) {
+                Some(WindowAppEvent.Background) => {
+                    match (borrow keptIn) {
+                        Some(folder) => { saveState(folder.view(), app, pane.ui.isDarkMode(), connected); }
+                        null => {}
+                    }
+                }
+                Some(WindowAppEvent.Foreground) => { pane.forget(mut share); } // the next frame is drawn whole
+                Some(WindowAppEvent.MemoryWarning) => {}
+                null => { break; }
+            }
         }
         drops.poll(mut window, mut pane.platform);
         takeMenuChoices(mut window, menus, mut pane.platform);

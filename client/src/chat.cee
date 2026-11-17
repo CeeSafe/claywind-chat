@@ -275,7 +275,10 @@ public fn chatFrame<M: TextMetrics>(ui: borrow mut Ui, app: borrow mut ChatApp, 
     if (ui.action("disconnect") && app.screen == SCREEN_CHAT) {
         app.wantsDisconnect = true;
     }
-    ui.open(Style.column().id("root").w(Size.grow()).h(Size.grow()).bg(chatBackground(ui)));
+    // The background fills the screen; the content keeps clear of a phone's bars and cutouts, and ends above its
+    // soft keyboard.
+    ui.open(Style.column().id("root").w(Size.grow()).h(Size.grow()).bg(chatBackground(ui))
+        .safe(ui.safeAreaWithKeyboard()));
     if (app.screen == SCREEN_CONNECT) {
         connectScreen(mut ui, mut app, metrics);
     } else {
@@ -285,8 +288,12 @@ public fn chatFrame<M: TextMetrics>(ui: borrow mut Ui, app: borrow mut ChatApp, 
 }
 
 fn connectScreen<M: TextMetrics>(ui: borrow mut Ui, app: borrow mut ChatApp, metrics: borrow M) {
-    ui.open(Style.column().w(Size.grow()).h(Size.grow()).alignXY(AxisAlign.Center, AxisAlign.Center));
-    ui.open(Style.column().w(Size.fixed(380.0)).p(space(8.0)).gap(space(3.0)).bg(panel(ui)).rounded(Radius.Xl));
+    // On a phone the panel is as wide as the screen allows.
+    let compact = ui.widthClass() == SizeClass.Compact;
+    ui.open(Style.column().w(Size.grow()).h(Size.grow()).p(if (compact) space(4.0) else 0.0)
+        .alignXY(AxisAlign.Center, AxisAlign.Center));
+    ui.open(Style.column().w(if (compact) Size.grow() else Size.fixed(380.0)).p(if (compact) space(5.0) else space(8.0))
+        .gap(space(3.0)).bg(panel(ui)).rounded(Radius.Xl));
     ui.label("ClayWind Chat", Text.of().font(TEXT_XL).color(ink(ui)).bold());
     ui.label("Server", Text.of().color(muted(ui)));
     Controls.textField(mut ui, metrics, "server", mut app.server.buf[..], mut app.server.len, mut app.server.edit);
@@ -310,47 +317,79 @@ fn connectScreen<M: TextMetrics>(ui: borrow mut Ui, app: borrow mut ChatApp, met
     ui.close();
 }
 
-fn chatScreen<M: TextMetrics>(ui: borrow mut Ui, app: borrow mut ChatApp, metrics: borrow M) {
-    ui.open(Style.row().w(Size.grow()).h(Size.grow()));
-    // The rooms.
-    ui.open(Style.column().w(Size.fixed(210.0)).h(Size.grow()).bg(panel(ui)).p(space(3.0)).gap(space(1.0)));
-    ui.label(app.me.view(), Text.of().color(ink(ui)).bold());
-    ui.label("Rooms", Text.of().color(muted(ui)));
-    for (k in 0..app.rooms.length) {
-        var idb = [0u8; 40];
-        var iw = TextWriter.create(mut idb[..]);
-        iw.text("room-");
-        iw.text(app.rooms[k].view());
-        let id = StringView.fromUtf8(iw.written()) ?? "room";
-        let selected = k == app.current;
-        ui.open(Style.box().id(id).w(Size.grow()).px(space(3.0)).py(space(1.5)).rounded(Radius.Md)
-            .cursor(Cursor.Pointer).bg(if (selected) BLUE_600 else NONE).hover(
-            Style.of().bg(if (selected) BLUE_600 else SLATE_700),
-        ));
-        if (ui.clicked(id)) {
-            app.current = k;
-            app.fresh = true;
-            app.focusDraft = true;
-        }
-        var nb = [0u8; 40];
-        var nw = TextWriter.create(mut nb[..]);
-        nw.byte('#');
-        nw.text(app.rooms[k].view());
-        ui.labelBytes(nw.written(), Text.of().color(if (selected) WHITE else ink(ui)));
+/// A room's entry in the list: selected by a click or a tap. In a column it is as wide as the column.
+fn roomEntry(ui: borrow mut Ui, app: borrow mut ChatApp, k: usize, wide: bool) {
+    var idb = [0u8; 40];
+    var iw = TextWriter.create(mut idb[..]);
+    iw.text("room-");
+    iw.text(app.rooms[k].view());
+    let id = StringView.fromUtf8(iw.written()) ?? "room";
+    let selected = k == app.current;
+    ui.open(Style.box().id(id).w(if (wide) Size.grow() else Size.fit()).px(space(3.0)).py(space(1.5))
+        .rounded(Radius.Md).cursor(Cursor.Pointer).bg(if (selected) BLUE_600 else NONE).hover(
+        Style.of().bg(if (selected) BLUE_600 else SLATE_700),
+    ));
+    if (ui.clicked(id)) {
+        app.current = k;
+        app.fresh = true;
+        app.focusDraft = wide; // on a phone the keyboard stays down until the line is tapped
+    }
+    var nb = [0u8; 40];
+    var nw = TextWriter.create(mut nb[..]);
+    nw.byte('#');
+    nw.text(app.rooms[k].view());
+    ui.labelBytes(nw.written(), Text.of().color(if (selected) WHITE else ink(ui)));
+    ui.close();
+}
+
+/// The field and button that join a room; in a row, the field takes the room the button leaves.
+fn joinControls<M: TextMetrics>(ui: borrow mut Ui, app: borrow mut ChatApp, metrics: borrow M, inRow: bool) {
+    let joinEnter = ui.keyPressed(Key.Enter) && ui.hasFocusNamed("join");
+    if (inRow) {
+        ui.open(Style.box().w(Size.grow()));
+    }
+    Controls.textField(mut ui, metrics, "join", mut app.joinRoom.buf[..], mut app.joinRoom.len, mut app.joinRoom.edit);
+    if (inRow) {
         ui.close();
     }
-    ui.open(Style.box().h(Size.grow()));
-    ui.close();
-    let joinEnter = ui.keyPressed(Key.Enter) && ui.hasFocusNamed("join");
-    Controls.textField(mut ui, metrics, "join", mut app.joinRoom.buf[..], mut app.joinRoom.len, mut app.joinRoom.edit);
     if ((Controls.button(mut ui, "join-btn", "Join room") || joinEnter) && app.joinRoom.trimmed().length > 0) {
         let room = String.from(app.joinRoom.trimmed())!;
         app.sendWords(["JOIN", room.view()][..]);
         app.joinRoom.set("");
     }
-    ui.close();
+}
+
+fn chatScreen<M: TextMetrics>(ui: borrow mut Ui, app: borrow mut ChatApp, metrics: borrow M) {
+    // A wide window has the rooms beside the room; a phone has them above it, in a row that scrolls sideways.
+    let compact = ui.widthClass() == SizeClass.Compact;
+    if (compact) {
+        ui.open(Style.column().w(Size.grow()).h(Size.grow()));
+        ui.open(Style.column().w(Size.grow()).bg(panel(ui)).p(space(3.0)).gap(space(2.0)));
+        ui.label(app.me.view(), Text.of().color(ink(ui)).bold());
+        ui.open(Style.row().id("rooms").w(Size.grow()).gap(space(1.0)).scroll(ScrollAxis.Horizontal));
+        for (k in 0..app.rooms.length) {
+            roomEntry(mut ui, mut app, k, false);
+        }
+        ui.close();
+        ui.open(Style.row().w(Size.grow()).gap(space(2.0)).alignXY(AxisAlign.Start, AxisAlign.Center));
+        joinControls(mut ui, mut app, metrics, true);
+        ui.close();
+        ui.close();
+    } else {
+        ui.open(Style.row().w(Size.grow()).h(Size.grow()));
+        ui.open(Style.column().w(Size.fixed(210.0)).h(Size.grow()).bg(panel(ui)).p(space(3.0)).gap(space(1.0)));
+        ui.label(app.me.view(), Text.of().color(ink(ui)).bold());
+        ui.label("Rooms", Text.of().color(muted(ui)));
+        for (k in 0..app.rooms.length) {
+            roomEntry(mut ui, mut app, k, true);
+        }
+        ui.open(Style.box().h(Size.grow()));
+        ui.close();
+        joinControls(mut ui, mut app, metrics, false);
+        ui.close();
+    }
     // The room.
-    ui.open(Style.column().w(Size.grow()).h(Size.grow()).p(space(4.0)).gap(space(3.0)));
+    ui.open(Style.column().w(Size.grow()).h(Size.grow()).p(if (compact) space(3.0) else space(4.0)).gap(space(3.0)));
     var title = [0u8; 40];
     var tw = TextWriter.create(mut title[..]);
     tw.byte('#');

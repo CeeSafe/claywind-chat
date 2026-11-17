@@ -14,7 +14,7 @@ runtime phase: what a real desktop app needs, and whether ClayWind gives it.
 
 ## Running the server
 
-Install the CeeSafe compiler (`ceesafec` 0.55.0 or later), then:
+Install the CeeSafe compiler (`ceesafec` 0.62.1 or later), then:
 
 ```sh
 cd server && ceesafec build && ./out/chat_server 7700
@@ -28,7 +28,7 @@ printf 'HELLO ada\nJOIN lobby\nSAY lobby hello\n' | nc 127.0.0.1 7700
 
 ## Running the client
 
-The client needs `ceesafec` 0.55.0 or later: its dependencies are packages in subdirectories of the ClayWind repository
+The client needs `ceesafec` 0.62.1 or later (0.55.0 for what follows, 0.62.1 for a phone): its dependencies are packages in subdirectories of the ClayWind repository
 (CeeSafe's ADR 0152), it shows times in the local time zone (ADR 0153), and on Windows 0.55.0 fixes fetching git
 dependencies and a first connection. Then, with a server running:
 
@@ -37,6 +37,25 @@ cd client && ceesafec build && ./out/claywind_chat
 ```
 
 Choose a name and press Enter.
+
+## On a phone
+
+The same client runs on an iPhone and an Android phone (ClayWind's mobile phase's gate). On a narrow screen the rooms
+are a row above the room; the content keeps clear of the system's bars and ends above the soft keyboard; and the app
+saves where it is each time it leaves the screen, so when the system ends it in the background it comes back with
+your server, name and draft, and connects again.
+
+ClayWind's `claywind-pack` makes the app, from the `client` directory (`--network` gives Android's network
+permission and the sentence iOS shows before the first connection to a device on the local network):
+
+```sh
+claywind_pack android --name "ClayWind Chat" --id com.example.chat --network "Connects to the chat server you name"
+adb install "out/pack/ClayWind Chat.apk"
+claywind_pack ios --name "ClayWind Chat" --id com.example.chat --network "Connects to the chat server you name"
+xcrun devicectl device install app --device <device> "out/pack/ios/ClayWind Chat.app"
+```
+
+On the phone, give the server as the address of the machine it runs on (`192.168.1.20:7700`), not `127.0.0.1`.
 
 ## Licence
 
