@@ -122,6 +122,10 @@ fn main() -> i32 {
         _ => false,
     };
     var keptIn: String? = null;
+    if (phone) {
+        app.onPhone = true;
+        app.server.set(""); // not this machine's: the saved state, if there is one, gives the last server
+    }
     if (phone && hotDir == null) {
         match (Directory.appData("claywind-chat")) {
             Ok(folder) => {

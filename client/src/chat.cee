@@ -58,6 +58,8 @@ public struct ChatApp {
     /// What the status line says (a connection's trouble, a refused line).
     public status: String;
     public connecting: bool;
+    /// On a phone: the server is another machine, so its field starts empty, with a hint.
+    public onPhone: bool;
     public me: String;
     public rooms: Vector<String>;
     public current: usize;
@@ -82,6 +84,7 @@ public struct ChatApp {
         joinRoom: Field.of(""),
         status: String.create(),
         connecting: false,
+        onPhone: false,
         me: String.create(),
         rooms: Vector<String>.create(),
         current: 0,
@@ -295,7 +298,11 @@ fn connectScreen<M: TextMetrics>(ui: borrow mut Ui, app: borrow mut ChatApp, met
     ui.open(Style.column().w(if (compact) Size.grow() else Size.fixed(380.0)).p(if (compact) space(5.0) else space(8.0))
         .gap(space(3.0)).bg(panel(ui)).rounded(Radius.Xl));
     ui.label("ClayWind Chat", Text.of().font(TEXT_XL).color(ink(ui)).bold());
-    ui.label("Server", Text.of().color(muted(ui)));
+    ui.label(
+        if (app.onPhone) "Server · its address and port, as 192.168.1.20:7700" else "Server",
+        Text.of().color(muted(ui))
+            .wrap(TextWrap.Words),
+    );
     Controls.textField(mut ui, metrics, "server", mut app.server.buf[..], mut app.server.len, mut app.server.edit);
     ui.label("Your name", Text.of().color(muted(ui)));
     let enter = ui.keyPressed(Key.Enter) && ui.hasFocusNamed("name");

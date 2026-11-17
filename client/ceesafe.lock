@@ -3,27 +3,27 @@
 [[package]]
 name = "claywind"
 source = "git+https://github.com/CeeSafe/Clay.git"
-commit = "a0f7a4ac92e459770e7852808ba12efcdb045dfc"
+commit = "017155c2b72720c53cde86d5bc1aa8f91901d15a"
 dir = "claywind"
-hash = "sha256:28bdc7e192523fec6a6a9e5cad7cf337390dd79db70df570c9f201beef549528"
+hash = "sha256:3ad8cfa4ff6036c3908afd55a38536c0dce9ea9932dffb55b172cc7460dc0bea"
 
 [[package]]
 name = "claywind_desktop"
 source = "git+https://github.com/CeeSafe/Clay.git"
-commit = "a0f7a4ac92e459770e7852808ba12efcdb045dfc"
+commit = "017155c2b72720c53cde86d5bc1aa8f91901d15a"
 dir = "claywind-desktop"
 hash = "sha256:5f36d01859ecd05518c8e12f2ac192819e0707993c46144735e7de9f83bac1dd"
 
 [[package]]
 name = "claywind_fonts"
 source = "git+https://github.com/CeeSafe/Clay.git"
-commit = "a0f7a4ac92e459770e7852808ba12efcdb045dfc"
+commit = "017155c2b72720c53cde86d5bc1aa8f91901d15a"
 dir = "claywind-fonts"
 hash = "sha256:5d843aac56e9a3154ab077124f8b7c4bf415cfb699bc78e5dbf4022255512814"
 
 [[package]]
 name = "claywind_tasks"
 source = "git+https://github.com/CeeSafe/Clay.git"
-commit = "a0f7a4ac92e459770e7852808ba12efcdb045dfc"
+commit = "017155c2b72720c53cde86d5bc1aa8f91901d15a"
 dir = "claywind-tasks"
 hash = "sha256:4e816789d7254007ed8eaa685098c14d5f8ab24dd5d08eb763e73addbff21681"
